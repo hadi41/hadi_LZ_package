@@ -1,405 +1,429 @@
-from .online_suffix import OnlineSuffixTree
+'''Pure Python implementation of LZ76 complexity using an online suffix tree.
+
+This module defines the `LZSuffixTree` class, which inherits from `OnlineSuffixTree`
+(from the `.online_suffix` module) and adapts it for calculating LZ76 complexity.
+It maintains the LZ76 parsing state (current word, dictionary, active match point)
+and uses the suffix tree (representing the dictionary of already processed phrases)
+_to efficiently check if the current word is a new phrase.
+
+This implementation is intended as a Python-based reference or for scenarios
+where the C backend is not available or desired. For performance, the C-backed
+wrappers should be used.
+'''
+from .online_suffix import OnlineSuffixTree # Suffix tree base class
 
 class LZSuffixTree(OnlineSuffixTree):
-    def __init__(self, initial_text=""):
-        """
-        Initialize an LZ-optimized suffix tree with optional initial text.
-        This suffix tree will only contain text[:-1] (all characters except the last one),
-        while keeping track of the full text as current_word.
-        
+    """Implements LZ76 complexity calculation using a Python-based OnlineSuffixTree.
+
+    Inherits from `OnlineSuffixTree` to use its suffix tree construction and
+    matching capabilities. This class adds specific logic for LZ76 parsing:
+    - The suffix tree (`self.text` in parent) stores the concatenation of
+      completed LZ phrases (i.e., the dictionary content).
+    - `self.current_word` tracks the current phrase being built.
+    - `self.last_char` is the latest character received, used to extend `current_word`.
+    - An active matching point (`last_match_node`, `last_match_edge`, `last_match_length`)
+      is maintained to efficiently check if `current_word` (after appending `last_char`)
+      is present in the suffix tree (i.e., the dictionary).
+
+    The core idea is that the `OnlineSuffixTree` (base class) will store the dictionary
+    of seen phrases (S1S2...Sk-1). When a new character arrives, it extends the current
+    word being formed (W). We then check if W is in the tree. If not, W (or W without
+    the last char, depending on specific LZ76 variant logic) becomes a new phrase Sk,
+    is added to the dictionary (and thus to the tree for future checks), and the current
+    word is reset.
+    """
+    def __init__(self, initial_text: str = ""):
+        """Initializes the LZSuffixTree for LZ76 calculation.
+
         Args:
-            initial_text (str): Optional initial text to add to the tree.
-        
-        LZ76 hidden variables:
-            last_match_node is the node we're on when parsing new word
-            last_match_edge is the first character of the edge we're on.
-            last_match_length is how far along the edge we are.
-
-        !! Note:
-            We use a character, rather than start and end of the edge.
-            This is because sometimes we split the edge we're on while building the suffix tree. 
-            In that case, the split happens exactly at our current position.
-            If we still assume the old edge end, we'd continue walking on an edge that no longer existed.
-            Then we'd sometimes find "no match" even though there is now a match, along a newly created branch. 
+            initial_text (str, optional): Optional initial text to process.
+                                        Characters will be added one by one.
+                                        Defaults to "".
         """
-
-        # Initialize parent class with an empty string
+        # Initialize parent OnlineSuffixTree. The parent's self.text will store
+        # the concatenation of phrases that form the LZ76 dictionary.
+        # It is initialized empty because the LZ dictionary is initially empty.
         super().__init__("")
         
-        # Current word is the full text (all characters)
-        self.current_word = ""
+        # LZ76 specific state variables:
+        self.current_word: str = ""  # The current phrase being built before it becomes a dictionary item.
+        self.current_text: str = "" # The full text processed so far by add_character calls.
+        self.last_char: str = ""     # The most recent character received via add_character.
         
-        # Track all characters received so far
-        self.current_text = ""
+        self.dictionary_size: int = 0 # Number of phrases in the LZ76 dictionary.
+        self.dictionary: list[str] = [] # List of the actual phrases found.
         
-        # Last character (not in the tree)
-        self.last_char = ""
+        # Active point for matching self.current_word (potentially extended by self.last_char)
+        # within the suffix tree (which represents self.dictionary text).
+        # This is analogous to Ukkonen's active point but used for LZ matching, not tree construction.
+        self.last_match_node = self.root  # Start matching from the root of the suffix tree.
+        self.last_match_edge: str | None = None # The first character of the edge we are currently on in the suffix tree during matching.
+        self.last_match_length: int = 0 # How far along that `last_match_edge` we have matched `current_word`.
         
-        # Dictionary size for LZ76 complexity
-        self.dictionary_size = 0
-        self.dictionary = []
-        
-        # Tracking variables for efficient matching (similar to Ukkonen's active point)
-        self.last_match_node = self.root  # Similar to active_node
-        self.last_match_edge = None       # Is the first character of the edge we're on
-        self.last_match_length = 0        # How far along the edge we are
-        
-        # Add initial text if provided
         if initial_text:
-            for char in initial_text:
-                self.add_character(char)
+            for char_val in initial_text:
+                self.add_character(char_val)
     
-    def add_character(self, char):
-        """
-        Add a character to current_word, update the tree with all but the last character,
-        and automatically compute LZ complexity. Uses Ukkonen-style tracking.
+    def add_character(self, char: str) -> bool:
+        """Processes a single character for LZ76 complexity calculation.
+
+        1. Appends `char` to `self.current_text` (full history) and sets `self.last_char`.
+        2. The `previous_last_char` (if any) is added to the `OnlineSuffixTree` (parent),
+           which means it becomes part of the dictionary represented by the tree.
+        3. It then checks if `self.current_word` extended by `char` (i.e., `self.current_word` + `char`)
+           can be found in the suffix tree using `is_current_word_in_tree()`.
+           `is_current_word_in_tree()` updates the LZ active match point.
+        4. If found: The current phrase (`self.current_word`) is extended with `char`.
+        5. If not found: `self.current_word + self.last_char` forms a new LZ phrase.
+           - `self.dictionary_size` is incremented.
+           - The new phrase is added to `self.dictionary` list.
+           - `self.current_word` is reset (it effectively becomes empty, as the next char will start it).
+           - The LZ active match point is reset to the root.
         
         Args:
-            char (str): The character to add
+            char (str): The character to add.
             
         Returns:
-            bool: True if a new word was added to the dictionary, False otherwise
+            bool: True if adding this character resulted in completing a new LZ phrase,
+                  False otherwise.
         """
-        # Store the result of whether a new word was added
-        added_new_word = False
+        if not isinstance(char, str) or len(char) != 1:
+            raise ValueError("Input must be a single character string.")
+
+        new_phrase_completed = False
         
-        # Add the character to current_word and current_text
-        self.current_word += char
         self.current_text += char
+        previous_last_char = self.last_char # Character to potentially add to suffix tree
+        self.last_char = char # Current character being processed by LZ logic
         
-        # Store the previous last character
-        previous_last = self.last_char
-        self.last_char = char
+        # The suffix tree (self.text in parent) should contain the concatenation of
+        # *completed* dictionary phrases. So, add `previous_last_char` to the tree.
+        if previous_last_char:
+            super().add_char(previous_last_char) # Add to the suffix tree (dictionary)
         
-        # If we have a previous character, add it to the tree
-        if previous_last:
-            super().add_char(previous_last)
-        
-        # Check if the new character can be found in the tree from our current position
+        # Now, try to match `self.current_word + self.last_char` in the tree.
+        # `is_current_word_in_tree` attempts to match `self.last_char` from the current
+        # LZ active point (self.last_match_node, .edge, .length).
         if self.is_current_word_in_tree():
-            # Character found - continue the current word
-            pass
+            # Match successful: self.last_char extends the current_word in the dictionary.
+            # The LZ active point was updated by is_current_word_in_tree.
+            self.current_word += self.last_char # Extend current word being built
         else:
-            # Character not found - add to dictionary and reset
+            # Match failed: `self.current_word + self.last_char` is a new phrase.
             self.dictionary_size += 1
+            self.dictionary.append(self.current_word + self.last_char) # Add completed phrase
+            self.current_word = ""  # Reset current_word for the *next* phrase
+                                   # (which starts with the *next* call to add_character)
             
-            # Reset tracking to start from root
+            # Reset LZ active match point to the root for the new phrase search.
             self.last_match_node = self.root
             self.last_match_edge = None
             self.last_match_length = 0
-            
-            # Reset current_word to be empty
-            self.reset_current_word()
-            
-            # Indicate that we've added a new word
-            added_new_word = True
+            new_phrase_completed = True
         
-        return added_new_word
+        return new_phrase_completed
     
-    def is_current_word_in_tree(self):
-        """
-        Check if next character is a valid continuation from our current position in the tree.
-        Uses a Ukkonen-style active point tracking for efficiency.
-        
-        Returns:
-            bool: True if pattern still matches in the tree, False otherwise
-        """
-        # If we're at the root and don't have a last character yet
-        if not self.last_char:
-            return True
-            
-        # If we're in the middle of an edge
-        if self.last_match_edge and self.last_match_length > 0:
-            # Get the edge information
-            edge_obj = self.last_match_node.children[self.last_match_edge]
-            start, end, _ = edge_obj.start, edge_obj.end, edge_obj.dest
-            
-            # Calculate the real end of the edge
-            real_end = end if end != float('inf') else self.global_end # In OnlineSuffixTree, global_end is the index
-            
-            # If we're not at the end of the edge yet
-            # The edge length logic uses global_end, which is text_len -1.
-            # An edge is text[start...real_end]. Length is real_end - start + 1.
-            # Comparison: text[start + current_match_length_on_this_edge]
-            # self.last_match_length is 1-indexed length along the conceptual match
-            # Edge characters are text[edge_obj.start] to text[edge_obj.start + edge_len -1]
-            # So the char to compare is text[edge_obj.start + self.last_match_length]
-            
-            # Original Python's edge.length() implies self.end includes global_end itself for open edges
-            # Edge.length(current_end) -> real_end = current_end; return real_end - self.start + 1
-            # This means an edge from start to global_end has length global_end - start + 1.
-            # The characters are text[start], text[start+1], ..., text[global_end]
-            # If self.last_match_length is 1, we check text[start+1]. If length is L, check text[start+L].
-            
-            # Let's use edge_obj.length method to be sure.
-            current_edge_len = edge_obj.length(self.global_end)
+    def is_current_word_in_tree(self) -> bool:
+        """Checks if `self.last_char` extends the current match from LZ active point.
 
-            if self.last_match_length < current_edge_len: # If current match length is less than full edge length
-                # Check if the next character matches on the current edge
-                if self.text[edge_obj.start + self.last_match_length] == self.last_char:
-                    # It matches, so update the length and return True
-                    self.last_match_length += 1
-                    return True
-                else:
-                    # No match - reset position (will be handled by caller by returning False)
-                    return False
-            else: # self.last_match_length == current_edge_len. We are at the end of this edge.
-                # We've reached the end of this edge, so we're at a node
-                self.last_match_node = edge_obj.dest
-                self.last_match_edge = None # We are now at a node, not on an edge
-                self.last_match_length = 0  # Reset length as we are at a node
-                # Fall through to the node logic below to find the self.last_char from this new node
+        This method attempts to find `self.last_char` in the suffix tree (`self.text`
+        of the parent class, representing the dictionary), starting from the current
+        LZ active match point (`self.last_match_node`, `self.last_match_edge`,
+        `self.last_match_length`).
+
+        If a match is found, the LZ active match point is updated.
+
+        Returns:
+            bool: True if `self.last_char` extends the match, False otherwise.
+        """
+        if not self.last_char: # Should not happen if called after add_character sets it.
+            return True # Or False, depending on desired behavior for empty last_char. Let's assume it means no extension possible.
+
+        # Case 1: We are currently in the middle of an edge in the suffix tree.
+        if self.last_match_edge and self.last_match_length > 0:
+            # Ensure the edge still exists from the active node.
+            if self.last_match_edge not in self.last_match_node.children:
+                # This indicates an inconsistent state, e.g. tree modified unexpectedly or bug.
+                # Resetting active point might be a recovery strategy.
+                # For now, assume this means no match.
+                # This can happen if the tree structure changed due to `super().add_char()`
+                # in a way that invalidates the old `last_match_edge` from `last_match_node`.
+                # A robust implementation might re-verify/re-trace from root if inconsistency is detected.
+                # Given current logic, let's try to re-evaluate from current last_match_node: 
+                self.last_match_edge = None 
+                self.last_match_length = 0 
+                # Fall through to node logic (Case 2)
+            else:
+                edge_obj = self.last_match_node.children[self.last_match_edge]
+                # `self.global_end` in parent refers to `len(self.text) - 1` of parent tree.
+                current_edge_actual_len = edge_obj.length(self.global_end) 
+
+                if self.last_match_length < current_edge_actual_len:
+                    # We are still on this edge. Check the next character on the edge.
+                    # The character in the tree is self.text[edge_obj.start + self.last_match_length]
+                    if self.text[edge_obj.start + self.last_match_length] == self.last_char:
+                        self.last_match_length += 1 # Extend match along this edge.
+                        return True
+                    else:
+                        return False # Mismatch on the edge.
+                else: # self.last_match_length == current_edge_actual_len
+                    # Reached the end of the current `last_match_edge`.
+                    # Transition to the destination node of this edge.
+                    self.last_match_node = edge_obj.dest
+                    self.last_match_edge = None # Now at a node.
+                    self.last_match_length = 0
+                    # Fall through to Case 2 (node logic) to find self.last_char from this new node.
         
-        # If we're at a node (either root or after traversing an edge fully)
-        # Check if there's an edge that starts with the last character
+        # Case 2: We are at a node (`self.last_match_node`).
+        # Try to find an outgoing edge starting with `self.last_char`.
         if self.last_char in self.last_match_node.children:
-            # Get the edge
-            self.last_match_edge = self.last_char # Store the first char of the new edge
-            self.last_match_length = 1 # We've matched 1 char along this new edge
-            # The active node for this new edge is still self.last_match_node
+            self.last_match_edge = self.last_char # Edge is identified by its first char.
+            self.last_match_length = 1 # Matched one character along this new edge.
+            # self.last_match_node remains the source of this new edge.
             return True
         
-        # No matching edge found - the pattern doesn't exist
-        return False
+        return False # No matching edge found from the current node.
     
-    def reset_current_word(self):
-        """
-        Reset the current word to empty.
+    def reset_current_word(self): #This method seems redundant with logic in add_character.
+        """Resets the current LZ word and the LZ active match point.
         
-        Returns:
-            None
+        This is typically called after a new phrase is completed and added to the dictionary.
+        Note: The original Python implementation had `self.dictionary.append(self.current_word)` here.
+        This is now handled in `add_character` to ensure correct phrase is appended.
         """
-        self.dictionary.append(self.current_word)
+        # self.dictionary.append(self.current_word) # Moved to add_character
         self.current_word = ''
-        # Reset tracking
         self.last_match_node = self.root
         self.last_match_edge = None
         self.last_match_length = 0
     
-    def get_current_tree_text(self):
+    def get_current_tree_text(self) -> str:
+        """Returns the text currently stored in the underlying suffix tree.
+        
+        This text represents the concatenation of all completed LZ dictionary phrases.
+        It corresponds to `self.text` from the `OnlineSuffixTree` parent class.
+
+        Returns:
+            str: The text content of the suffix tree.
         """
-        Get the text currently in the suffix tree (excludes the last character).
+        return self.text # Accesses parent's text attribute
+    
+    def compute_lz76_complexity(self) -> int:
+        """Computes the LZ76 complexity based on the current state.
+        
+        LZ76 complexity is the number of phrases in the dictionary (`self.dictionary_size`).
+        If there is an active `self.current_word` being built (which is not yet in the
+        dictionary list but would be the next phrase), it is also counted.
         
         Returns:
-            str: The text in the tree
+            int: The LZ76 complexity.
         """
-        return self.text
+        # The C version (get_lz_complexity_c) returns C.dictionary_size + (1 if C.current_word_len > 0 else 0).
+        # Here, self.dictionary_size tracks completed phrases.
+        # self.current_word tracks the phrase currently being formed.
+        complexity = self.dictionary_size
+        if self.current_word: # If there's an unfinished phrase, it counts as one more.
+            complexity += 1
+        return complexity
     
-    def compute_lz76_complexity(self):
-        """
-        Compute the LZ76 complexity of the current text.
-        
-        LZ76 complexity is the dictionary size plus 1 if there's an active word being processed.
-        This accounts for the fact that when compressing, we need to describe the current
-        word we're actively working on.
-        
+    def return_dictionary(self) -> list[str]:
+        """Returns the list of LZ76 phrases found so far.
+
+        This includes all completed phrases stored in `self.dictionary` and also
+        the `self.current_word` if it's non-empty (representing the phrase currently
+        being formed).
+
         Returns:
-            int: The LZ76 complexity (dictionary size + 1 if current_word is not empty)
+            list[str]: The list of LZ76 dictionary phrases.
         """
-        # If we have an active word being processed, add 1 to the dictionary size
-        if self.current_word:
-            return self.dictionary_size + 1
-        # Otherwise, just return the dictionary size
-        return self.dictionary_size
+        # Make a copy to avoid external modification of internal list.
+        full_dictionary = list(self.dictionary) 
+        if self.current_word: 
+            full_dictionary.append(self.current_word)
+        return full_dictionary
     
-    def return_dictionary(self):
-        """
-        Return the dictionary.
-        """
-        if self.current_word:
-            return self.dictionary + [self.current_word]
-        else:
-            return self.dictionary
-    
-    def reset(self):
-        """
-        Reset the tree and all associated variables.
+    def reset(self) -> None:
+        """Resets the LZSuffixTree to its initial empty state.
         
-        Returns:
-            None
+        This involves resetting the parent `OnlineSuffixTree` and all LZ76-specific
+        state variables of this class.
         """
-        # Reset parent class
-        super().__init__("")
+        super().__init__("") # Reset parent OnlineSuffixTree (clears text, root, active point etc.)
         
-        # Reset LZ-specific variables
+        # Reset LZ-specific state variables
         self.current_word = ""
         self.current_text = ""
         self.last_char = ""
         self.dictionary_size = 0
+        self.dictionary = []
         
-        # Reset tracking variables
-        self.last_match_node = self.root
+        self.last_match_node = self.root # Should be new root from super().__init__
         self.last_match_edge = None
         self.last_match_length = 0
     
-    def display_status(self):
-        """
-        Display the current status of the LZ suffix tree.
+    def display_status(self) -> None:
+        """Prints the current status of the LZ suffix tree processing.
         
-        Returns:
-            None
+        Includes the current word being built, the full text processed, the text
+        in the underlying suffix tree (dictionary content), dictionary size, and
+        details about the current LZ active match point.
         """
-        print(f"Current word: '{self.current_word}'")
-        print(f"Current text: '{self.current_text}'")
-        print(f"Text in tree: '{self.text}'")
-        print(f"Dictionary size: {self.dictionary_size}")
+        print("---- LZ Suffix Tree Status (Python) ----")
+        print(f"Full Text Processed: '{self.current_text}'")
+        print(f"Current Word (being built): '{self.current_word}'")
+        print(f"Dictionary Phrases: {self.dictionary}")
+        print(f"Dictionary Size: {self.dictionary_size}")
+        print(f"Computed LZ76 Complexity: {self.compute_lz76_complexity()}")
+        print(f"Text in Suffix Tree (dictionary content): '{self.text}'") # From parent
         
-        # Display tracking info
-        print(f"Last character: '{self.last_char}'")
-        print(f"Match position: node at {'root' if self.last_match_node == self.root else 'internal node'}")
+        print(f"Last Char Processed by LZ: '{self.last_char}'")
+        active_node_type = 'root' if self.last_match_node == self.root else 'internal'
+        print(f"LZ Active Match Node: {active_node_type} (id: {id(self.last_match_node)})")
+        
         if self.last_match_edge:
-            edge_obj = self.last_match_node.children[self.last_match_edge]
-            edge_start, edge_end, _ = edge_obj.start, edge_obj.end, edge_obj.dest
-            real_end = edge_end if edge_end != float('inf') else self.global_end
-            edge_str = self.text[edge_start:real_end+1] if self.text and real_end >= edge_start else ""
-            print(f"Match edge: '{edge_str}', position: {self.last_match_length}")
+            if self.last_match_node and self.last_match_edge in self.last_match_node.children:
+                edge_obj = self.last_match_node.children[self.last_match_edge]
+                # Use parent's global_end for correct edge length calculation
+                real_end = edge_obj.end if edge_obj.end != float('inf') else self.global_end 
+                edge_str_segment = self.text[edge_obj.start : min(real_end, self.global_end) + 1] if self.text and real_end >= edge_obj.start else "<edge error>"
+                print(f"LZ Active Match Edge: starts with '{self.last_match_edge}', label in tree: '{edge_str_segment}', matched length: {self.last_match_length}")
+            else:
+                print(f"LZ Active Match Edge: '{self.last_match_edge}' (but not found in current node children - state might be inconsistent or just after node transition)")
         else:
-            print("No active edge")
-            
-        print("Tree structure:")
-        self.display()
+            print("LZ Active Match Edge: None (at a node)")
+        print("----------------------------------------")
 
-    def display_graphviz(self):
-        """
-        Create a graphviz visualization of the suffix tree with the current parsing path highlighted.
+    def display_graphviz(self, view_now=False):
+        """Generates a Graphviz visualization of the underlying suffix tree.
         
+        Highlights the current LZ active match path if applicable.
+        This method calls the parent `OnlineSuffixTree.display_graphviz`.
+
+        Args:
+            view_now (bool): If True, attempts to render and view the graph immediately.
+                             Defaults to False.
         Returns:
-            graphviz.Digraph: The graphviz plot object with highlighted parsing path
+            graphviz.Digraph or None: The graph object if graphviz is available, else None.
         """
-        # Get the path to highlight based on our current position
-        highlight_path = []
-        
-        # If we have an active match position
-        if self.current_word:
-            # Start from root
-            current_node_for_viz = self.root
-            
-            # This reconstruction needs to be careful based on Python's LZ logic.
-            # The Python version's self.last_match_node, self.last_match_edge, self.last_match_length
-            # describe the end of the *longest match of current_word[:-1]* in the tree.
-            # And `is_current_word_in_tree` then tries to extend with `self.last_char` (current_word[-1]).
-            
-            # For highlighting, we want to show the path of current_word as much as it exists.
-            # This is complex because the highlight_path in parent display_graphviz expects a sequence
-            # of (node, edge_char_from_node) or (node, None).
+        # Attempt to reconstruct the path of self.current_word in the tree for highlighting.
+        # This path is relative to the suffix tree's content (self.text).
+        highlight_path_nodes = [] 
+        current_highlight_node = self.root
+        matched_len = 0
 
-            # Simpler approach for now: Highlight up to last_match_node.
-            # If last_match_edge is set, it means current_word[-1] made a match along that edge.
+        if self.current_word and self.text: # Only try if current_word and tree text exist
+            highlight_path_nodes.append((current_highlight_node, None)) # Start at root
+            word_to_trace = self.current_word
 
-            # Simplified highlighting: just show the last_match_node and the edge if one was taken for last_char
-            # This might not fully trace current_word if it's long.
-            # A more accurate highlight would re-trace current_word from root.
-            # Let's try to re-trace current_word for highlighting.
-            
-            path_trace_node = self.root
-            path_idx = 0
-            
-            # Add root
-            highlight_path.append((path_trace_node, None))
-            
-            temp_match_length = 0 # Tracks how much of current_word is matched for highlighting
-
-            while temp_match_length < len(self.current_word):
-                char_to_find_in_highlight = self.current_word[temp_match_length]
-                if char_to_find_in_highlight in path_trace_node.children:
-                    edge_obj_viz = path_trace_node.children[char_to_find_in_highlight]
-                    highlight_path[-1] = (path_trace_node, char_to_find_in_highlight) # Mark edge taken from current node
+            while matched_len < len(word_to_trace):
+                char_to_find = word_to_trace[matched_len]
+                if char_to_find in current_highlight_node.children:
+                    edge = current_highlight_node.children[char_to_find]
+                    highlight_path_nodes[-1] = (current_highlight_node, char_to_find) # Mark edge taken
                     
-                    edge_text_viz = self.text[edge_obj_viz.start : min(edge_obj_viz.end, self.global_end) + 1]
+                    edge_label_in_tree = self.text[edge.start : min(edge.end, self.global_end) + 1]
+                    len_on_edge = 0
+                    for i in range(len(edge_label_in_tree)):
+                        if matched_len + i < len(word_to_trace) and \
+                           word_to_trace[matched_len + i] == edge_label_in_tree[i]:
+                            len_on_edge += 1
+                        else:
+                            break # Mismatch or end of word_to_trace on this edge
                     
-                    can_traverse_full_edge = True
-                    for k in range(len(edge_text_viz)):
-                        if temp_match_length + k >= len(self.current_word) or self.current_word[temp_match_length + k] != edge_text_viz[k]:
-                            # current_word ends or mismatches on this edge
-                            # highlight only up to temp_match_length + k on this edge
-                            # The graphviz highlight highlights the whole edge if (node, edge_char) is given.
-                            # This detail is hard to show with parent's current highlight_path format.
-                            can_traverse_full_edge = False
-                            break 
-                        
-                    if can_traverse_full_edge:
-                        temp_match_length += len(edge_text_viz)
-                        path_trace_node = edge_obj_viz.dest
-                        highlight_path.append((path_trace_node, None)) # Arrived at new node
+                    matched_len += len_on_edge
+                    if len_on_edge == len(edge_label_in_tree) and matched_len < len(word_to_trace):
+                        # Traversed full edge and more of word_to_trace remains
+                        current_highlight_node = edge.dest
+                        highlight_path_nodes.append((current_highlight_node, None)) # Arrived at new node
                     else:
-                        # current_word ends midway on this edge or mismatches.
-                        # The edge is highlighted, and we stop.
-                        # temp_match_length would have been updated by the inner loop not shown here.
-                        # For simplicity, we just say the edge was taken.
+                        # Word ends on this edge or mismatched
                         break 
                 else:
-                    # No edge for this char_to_find_in_highlight from path_trace_node
-                    break # current_word cannot be traced further
-
-        # Create the visualization with highlighted path
-        dot = super().display_graphviz(highlight_path=highlight_path)
+                    break # No edge for char_to_find
         
-        if dot:
-            # Add a title showing current state
-            title = f"Current word: {self.current_word}\n"
-            title += f"Last match position:\n"
-            title += f"Node: {'root' if self.last_match_node == self.root else 'internal'}\n"
-            if self.last_match_edge:
-                edge_obj = self.last_match_node.children[self.last_match_edge]
-                edge_start, edge_end, _ = edge_obj.start, edge_obj.end, edge_obj.dest
-                real_end = edge_end if edge_end != float('inf') else self.global_end
-                edge_str = self.text[edge_start:real_end+1] if self.text and real_end >= edge_start else ""
-                title += f"Edge: '{edge_str}', position: {self.last_match_length}"
-            else:
-                title += "No active edge"
-            dot.attr(label=title)
-        
-        return dot
+        # Call parent's display_graphviz with the constructed highlight path.
+        # The parent method should handle the actual graphviz object creation.
+        try:
+            # Assuming parent class `OnlineSuffixTree` has `display_graphviz`
+            # that accepts `highlight_path` (list of (node, edge_char_or_None) tuples)
+            # and `view_now`.
+            dot = super().display_graphviz(highlight_path=highlight_path_nodes, view_now=False) 
+            if dot:
+                # Add custom title for LZ Suffix Tree status
+                title_parts = [
+                    f"LZ Suffix Tree Status",
+                    f"Full Text: '{self.current_text}'",
+                    f"Current LZ Word: '{self.current_word}'",
+                    f"Dictionary Size: {self.dictionary_size}", 
+                    f"Computed LZ76: {self.compute_lz76_complexity()}",
+                    f"Tree Text (LZ Dict): '{self.text}'"]
+                dot.attr(label='\n'.join(title_parts), labelloc='t')
+                if view_now:
+                    dot.view() # Attempt to render and open
+            return dot
+        except AttributeError:
+            print("Graphviz display not available or parent method missing.", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error during Graphviz generation: {e}", file=sys.stderr)
+            return None
 
-# Example usage
+# Example usage:
 if __name__ == "__main__":
-    # Create an LZ suffix tree
-    lz_tree = LZSuffixTree()
+    print("--- LZSuffixTree (Python) Example ---")
+    lz_tree = LZSuffixTree() # Initialize empty
     
-    # Process text with automatic LZ76 parsing
-    word = "0101010101"  # Should have LZ76 complexity of 2
-    print(f"Processing '{word}' with optimized LZ76 parsing:")
+    test_word = "0101010101" 
+    print(f"Processing string: '{test_word}'")
     
-    for i, char in enumerate(word):
-        new_word_added = lz_tree.add_character(char)
-        print(f"\nAfter adding '{char}':")
-        
-        if new_word_added:
-            print(f"New word was added to dictionary. Dictionary size now: {lz_tree.dictionary_size}")
+    for char_idx, char_val in enumerate(test_word):
+        new_phrase_added = lz_tree.add_character(char_val)
+        print(f"\nAdded '{char_val}' (char {char_idx+1}/{len(test_word)}):")
+        if new_phrase_added:
+            print(f"  >> New phrase completed. Dictionary size: {lz_tree.dictionary_size}")
         else:
-            print(f"Current word continues. Dictionary size remains: {lz_tree.dictionary_size}")
-        
-        print(f"Current word is now: '{lz_tree.current_word}'")
-        print(f"Last match length: {lz_tree.last_match_length}")
+            print(f"  >> Current phrase extended. Dictionary size: {lz_tree.dictionary_size}")
+        lz_tree.display_status()
+        # For debugging, view tree at each step (requires graphviz)
+        # lz_tree.display_graphviz(view_now=True) 
+        # input("Press Enter to continue...")
+
+    final_complexity = lz_tree.compute_lz76_complexity()
+    print(f"\n--- Final State for '{test_word}' ---")
+    lz_tree.display_status()
+    print(f"Final Computed LZ76 Complexity: {final_complexity}")
+    print(f"Final Dictionary Phrases: {lz_tree.return_dictionary()}")
+
+    # Expected for "0101010101": S1=0, S2=1, S3=01, S4=010, S5=10101 -> 5 phrases
+    # Or, if logic is S1=0, S2=1, S3=01, S4=010, S5=10, S6=101 -> 6 phrases
+    # The implementation logic of add_character / is_current_word_in_tree determines this.
+    # Current: S1=0, S2=1, S3=01, S4=010, S5=10101 (length 5)
+    # Dictionary: ['0', '1', '01', '010', '10101'] -> size 5. No current_word left.
+    # So complexity should be 5.
+
+    print("\nTesting reset...")
+    lz_tree.reset()
+    lz_tree.add_character('a')
+    lz_tree.add_character('b')
+    lz_tree.add_character('a')
+    lz_tree.add_character('c')
+    print(f"After 'abac': Complexity = {lz_tree.compute_lz76_complexity()}, Dict = {lz_tree.return_dictionary()}")
+    lz_tree.display_status()
+
+    # Test with a string that might have interesting suffix tree structure
+    print("\nTesting with 'bananaabandana$'...")
+    lz_tree_banana = LZSuffixTree("bananaabandana$")
+    lz_tree_banana.display_status()
+    print(f"LZ76 for 'bananaabandana$': {lz_tree_banana.compute_lz76_complexity()}")
+    print(f"Dictionary: {lz_tree_banana.return_dictionary()}")
     
-    # Final check for the last word
-    if lz_tree.current_word and not lz_tree.is_current_word_in_tree():
-        lz_tree.dictionary_size += 1
-        # Reset current_word to avoid double counting in complexity calculation
-        lz_tree.current_word = ""
-        print(f"\nAdded final word to dictionary. Dictionary size now: {lz_tree.dictionary_size}")
-    
-    # Display final LZ76 complexity
-    lz_complexity = lz_tree.compute_lz76_complexity()
-    print(f"\nFinal LZ76 complexity for '{word}': {lz_complexity}")
-    
-    # For binary alternating pattern "0101010101", the LZ76 complexity should be:
-    # - If current_word is empty: 2
-    # - If current_word is not empty: 3 (dictionary size 2 + active word)
-    expected_complexity = 3 if lz_tree.current_word else 2
-    
-    # Compare with the expected answer
-    if lz_complexity == expected_complexity:
-        print(f"Correct! LZ76 complexity for '0101010101' should be {expected_complexity}.")
-        if lz_tree.current_word:
-            print(f"This includes dictionary size {lz_tree.dictionary_size} plus 1 for the active word '{lz_tree.current_word}'.")
-    else:
-        print(f"Something went wrong! LZ76 complexity for '0101010101' should be {expected_complexity}, but got {lz_complexity}.")
-    
-    # Create and display the graphviz visualization
-    dot = lz_tree.display_graphviz()
-    if dot:
-        # Save the visualization to a file
-        dot.render("lz_suffix_tree", format="png", cleanup=True)
-        print("\nVisualization saved as 'lz_suffix_tree.png'")
+    # If graphviz is installed, generate a visualization of the final banana tree
+    # print("Attempting to generate Graphviz for banana tree...")
+    # dot_banana = lz_tree_banana.display_graphviz(view_now=False)
+    # if dot_banana:
+    #     try:
+    #         dot_banana.render("lz_suffix_tree_banana", format="png", cleanup=True)
+    #         print("Visualization 'lz_suffix_tree_banana.png' saved.")
+    #     except Exception as e_gv:
+    #         print(f"Could not render graphviz: {e_gv}")
 

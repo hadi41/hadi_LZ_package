@@ -1,74 +1,100 @@
 # Makefile for hadi_LZ_package C backend
 
-# Compiler: Default to clang, user can override (e.g., make CC=gcc)
+# --- Compiler and Flags Configuration ---
+
+# Compiler: Default to clang. User can override by calling make with CC=gcc, for example.
 CC = clang
 
-# CFLAGS: -fPIC for shared libraries, -O2 for optimization.
-# Add -Wall for more warnings. Add -g for debugging symbols if needed.
+# CFLAGS: Standard C compiler flags.
+# -fPIC: Generate Position Independent Code, necessary for shared libraries.
+# -O2: Level 2 optimization.
+# -Wall: Enable all warnings (recommended for development).
+# Consider adding -g for debugging symbols if needed: CFLAGS = -fPIC -O2 -Wall -g
 CFLAGS = -fPIC -O2 -Wall
 
-# LDFLAGS: -shared for creating shared libraries
+# LDFLAGS: Linker flags.
+# -shared: Create a shared library.
 LDFLAGS = -shared
 
-# Shared library extension (specific to macOS here)
-SHARED_LIB_EXT = .dylib
+# SHARED_LIB_EXT: Extension for shared libraries. This is specific to the OS.
+# .dylib for macOS, .so for Linux.
+SHARED_LIB_EXT = .dylib # macOS specific
+# SHARED_LIB_EXT = .so # Linux specific - uncomment and adjust if needed
 
-# Target directory for built libraries (current directory)
-TARGET_DIR = .
+# TARGET_DIR: Directory where the compiled shared libraries will be placed.
+TARGET_DIR = . # Current directory
 
-# --- OpenMP settings for clang on macOS ---
-# Assumes libomp installed via Homebrew.
-# Verify paths with: brew info libomp
-# If these paths are incorrect or libomp is not installed, compilation of lz_exhaustive will fail.
-OMP_INCLUDE_DIR = /opt/homebrew/opt/libomp/include
-OMP_LIB_DIR = /opt/homebrew/opt/libomp/lib
+# --- OpenMP Configuration (for clang on macOS with libomp from Homebrew) ---
+# OpenMP is used for parallelizing lz_core and lz_exhaustive.
+# These paths assume libomp is installed via Homebrew at the default location for arm64 macOS.
+# For Intel macOS or different libomp installations, these paths might need adjustment.
+# To check your libomp installation paths (if installed via Homebrew): `brew info libomp`
+OMP_BASE_DIR = /opt/homebrew/opt/libomp # Common base for Homebrew on ARM macOS
+# OMP_BASE_DIR = /usr/local/opt/libomp # Common base for Homebrew on Intel macOS - uncomment if needed
+
+OMP_INCLUDE_DIR = $(OMP_BASE_DIR)/include
+OMP_LIB_DIR = $(OMP_BASE_DIR)/lib
 
 # OpenMP compiler and linker flags for clang.
-# For GCC, OMP_CFLAGS and OMP_LDFLAGS might simply be -fopenmp.
-OMP_CFLAGS = -Xpreprocessor -fopenmp
-OMP_LDFLAGS = -lomp
+# For GCC, these are typically just -fopenmp for both CFLAGS and LDFLAGS.
+OMP_CFLAGS_CLANG = -Xpreprocessor -fopenmp # Tells clang preprocessor to enable OpenMP
+OMP_LDFLAGS_CLANG = -lomp                   # Links against the OpenMP library (libomp)
 
-# Check if OMP directories exist and add flags conditionally
-# This requires GNU Make specific features for 'wildcard' and 'if'.
-# For simplicity, we'll include them and user can comment out or fix if libomp is not at these paths.
-# A more robust solution would involve configure scripts or CMake.
-CFLAGS_OMP_INC = $(if $(wildcard $(OMP_INCLUDE_DIR)/omp.h),-I$(OMP_INCLUDE_DIR))
-LDFLAGS_OMP_LIB = $(if $(wildcard $(OMP_LIB_DIR)/libomp$(SHARED_LIB_EXT)),-L$(OMP_LIB_DIR))
+# Select OpenMP flags based on compiler (basic check for clang vs gcc)
+ifeq ($(CC),gcc)
+    OMP_CFLAGS = -fopenmp
+    OMP_LDFLAGS = -fopenmp
+    # For GCC, OMP_INCLUDE_DIR and OMP_LIB_DIR might not be needed if OpenMP is built-in.
+    # If using a specific GCC libgomp, adjust paths similar to libomp if necessary.
+else
+    # Default to clang style OpenMP flags
+    OMP_CFLAGS = $(OMP_CFLAGS_CLANG) -I$(OMP_INCLUDE_DIR)
+    OMP_LDFLAGS = -L$(OMP_LIB_DIR) $(OMP_LDFLAGS_CLANG)
+endif
 
+# --- Targets ---
 
-# --- Default Target: Build all libraries ---
+# Default Target: `make` or `make all` will build all specified shared libraries.
+# The order can matter if one library depends on another, though here they are mostly independent C source compilations.
 all: $(TARGET_DIR)/liblzcore$(SHARED_LIB_EXT) \
      $(TARGET_DIR)/online_suffix$(SHARED_LIB_EXT) \
      $(TARGET_DIR)/lz_suffix_combined$(SHARED_LIB_EXT) \
      $(TARGET_DIR)/lz_exhaustive$(SHARED_LIB_EXT)
 
 # --- Individual Library Build Rules ---
+# Each rule specifies how to build a target shared library from its source files.
+# $< refers to the first prerequisite (the .c file).
+# $@ refers to the target file name.
 
-# liblzcore: from lz_core.c
+# liblzcore: Core LZ76, LZ78, Block Entropy. Uses OpenMP.
 $(TARGET_DIR)/liblzcore$(SHARED_LIB_EXT): lz_core.c lz_core.h
-	$(CC) $(CFLAGS) $(OMP_CFLAGS) -I$(OMP_INCLUDE_DIR) $(LDFLAGS) -L$(OMP_LIB_DIR) $(OMP_LDFLAGS) -o $@ lz_core.c
+	$(CC) $(CFLAGS) $(OMP_CFLAGS) $(LDFLAGS) -o $@ lz_core.c $(OMP_LDFLAGS)
 	@echo "Built $@"
 
-# online_suffix: from online_suffix.c
+# online_suffix: Suffix tree implementation (Ukkonen's algorithm). Does not use OpenMP itself.
 $(TARGET_DIR)/online_suffix$(SHARED_LIB_EXT): online_suffix.c online_suffix.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ online_suffix.c
 	@echo "Built $@"
 
-# lz_suffix_combined: from lz_suffix.c and online_suffix.c
+# lz_suffix_combined: LZ76 implementation using suffix trees. Links online_suffix.c sources.
+# This creates a single shared library from lz_suffix.c and online_suffix.c.
 $(TARGET_DIR)/lz_suffix_combined$(SHARED_LIB_EXT): lz_suffix.c lz_suffix.h online_suffix.c online_suffix.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ lz_suffix.c online_suffix.c
 	@echo "Built $@"
 
-# lz_exhaustive: from lz_exhaustive.c (requires OpenMP)
+# lz_exhaustive: Exhaustive LZ76 calculation for all binary strings. Uses OpenMP.
 $(TARGET_DIR)/lz_exhaustive$(SHARED_LIB_EXT): lz_exhaustive.c lz_exhaustive.h
-	$(CC) $(CFLAGS) $(OMP_CFLAGS) -I$(OMP_INCLUDE_DIR) $(LDFLAGS) -L$(OMP_LIB_DIR) $(OMP_LDFLAGS) -o $@ lz_exhaustive.c
+	$(CC) $(CFLAGS) $(OMP_CFLAGS) $(LDFLAGS) -o $@ lz_exhaustive.c $(OMP_LDFLAGS)
 	@echo "Built $@"
 
 # --- Clean Target ---
+# `make clean` removes compiled libraries and object files from TARGET_DIR.
 clean:
 	@echo "Cleaning build artifacts in $(TARGET_DIR)..."
 	rm -f $(TARGET_DIR)/*$(SHARED_LIB_EXT) $(TARGET_DIR)/*.o
 	@echo "Clean complete."
 
-# Phony targets (targets that are not actual files)
+# --- Phony Targets ---
+# .PHONY declares targets that are not actual files. `all` and `clean` are common examples.
+# This prevents make from getting confused if a file named 'all' or 'clean' exists.
 .PHONY: all clean
