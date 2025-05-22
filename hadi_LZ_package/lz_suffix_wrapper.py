@@ -324,7 +324,7 @@ if __name__ == '__main__':
         batch_results = batch_wrapper.compute_lz76_complexity_batch(test_strings_batch)
         print("Batch results:")
         for s, res in zip(test_strings_batch, batch_results):
-            print(f"  LZ76('{s if s else \'<empty>\'}'): {res}")
+            print(f"  LZ76('{s if s else '<empty>'}'): {res}")
         
         # Ensure the batch_wrapper state is clean after batch (it should be, due to internal resets)
         print("State of batch_wrapper after batch operation:")
