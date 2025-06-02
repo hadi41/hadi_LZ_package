@@ -1,5 +1,6 @@
 # Makefile for hadi_LZ_package C backend
-
+#changes: deleted rogue spaces and put comments on new lines to fix mac ARM issue
+#added alternative Clean function (original in comments)
 # --- Compiler and Flags Configuration ---
 
 # Compiler: Default to clang. User can override by calling make with CC=gcc, for example.
@@ -18,18 +19,21 @@ LDFLAGS = -shared
 
 # SHARED_LIB_EXT: Extension for shared libraries. This is specific to the OS.
 # .dylib for macOS, .so for Linux.
-SHARED_LIB_EXT = .dylib # macOS specific
+SHARED_LIB_EXT = .dylib
+# macOS specific
 # SHARED_LIB_EXT = .so # Linux specific - uncomment and adjust if needed
 
 # TARGET_DIR: Directory where the compiled shared libraries will be placed.
-TARGET_DIR = . # Current directory
+TARGET_DIR = .
+# Current directory
 
 # --- OpenMP Configuration (for clang on macOS with libomp from Homebrew) ---
 # OpenMP is used for parallelizing lz_core and lz_exhaustive.
 # These paths assume libomp is installed via Homebrew at the default location for arm64 macOS.
 # For Intel macOS or different libomp installations, these paths might need adjustment.
 # To check your libomp installation paths (if installed via Homebrew): `brew info libomp`
-OMP_BASE_DIR = /opt/homebrew/opt/libomp # Common base for Homebrew on ARM macOS
+OMP_BASE_DIR = /opt/homebrew/opt/libomp
+# Common base for Homebrew on ARM macOS
 # OMP_BASE_DIR = /usr/local/opt/libomp # Common base for Homebrew on Intel macOS - uncomment if needed
 
 OMP_INCLUDE_DIR = $(OMP_BASE_DIR)/include
@@ -37,8 +41,10 @@ OMP_LIB_DIR = $(OMP_BASE_DIR)/lib
 
 # OpenMP compiler and linker flags for clang.
 # For GCC, these are typically just -fopenmp for both CFLAGS and LDFLAGS.
-OMP_CFLAGS_CLANG = -Xpreprocessor -fopenmp # Tells clang preprocessor to enable OpenMP
-OMP_LDFLAGS_CLANG = -lomp                   # Links against the OpenMP library (libomp)
+OMP_CFLAGS_CLANG = -Xpreprocessor -fopenmp
+# Tells clang preprocessor to enable OpenMP
+OMP_LDFLAGS_CLANG = -lomp
+# Links against the OpenMP library (libomp)
 
 # Select OpenMP flags based on compiler (basic check for clang vs gcc)
 ifeq ($(CC),gcc)
@@ -91,8 +97,13 @@ $(TARGET_DIR)/lz_exhaustive$(SHARED_LIB_EXT): lz_exhaustive.c lz_exhaustive.h
 # `make clean` removes compiled libraries and object files from TARGET_DIR.
 clean:
 	@echo "Cleaning build artifacts in $(TARGET_DIR)..."
-	rm -f $(TARGET_DIR)/*$(SHARED_LIB_EXT) $(TARGET_DIR)/*.o
+	@find $(TARGET_DIR) -maxdepth 1 -name "*$(SHARED_LIB_EXT)" -delete
+	@find $(TARGET_DIR) -maxdepth 1 -name "*.o" -delete
 	@echo "Clean complete."
+#clean:
+#	@echo "Cleaning build artifacts in $(TARGET_DIR)..."
+#	rm -f $(TARGET_DIR)/*$(SHARED_LIB_EXT) $(TARGET_DIR)/*.o
+#	@echo "Clean complete."
 
 # --- Phony Targets ---
 # .PHONY declares targets that are not actual files. `all` and `clean` are common examples.
